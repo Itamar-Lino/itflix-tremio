@@ -146,6 +146,6 @@ builder.defineStreamHandler(({ type, id }) => {
 });
 
 // ── Iniciar servidor ──────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 7000;
+const PORT = process.env.PORT || 10000;
 serveHTTP(builder.getInterface(), { port: PORT });
 console.log(`\n🎬 ITFLIXHD Addon rodando em http://localhost:${PORT}/manifest.json\n`);
