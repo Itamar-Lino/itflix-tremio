@@ -1,0 +1,22 @@
+{
+  "name": "itflixhd-addon",
+  "version": "1.0.0",
+  "description": "Addon Stremio ITFLIXHD - Filmes e Séries em HD",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "keywords": ["stremio", "addon", "filmes", "séries", "itflixhd"],
+  "author": "ITFLIXHD",
+  "license": "MIT"
+}
