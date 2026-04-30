@@ -10,7 +10,7 @@ const manifest = {
   version: '1.0.0',
   name: 'ITFLIXHD',
   description: 'Assista filmes em HD com o addon ITFLIXHD para Stremio.',
-  logo: 'https://logowik.com/content/uploads/images/iflix7255.jpg',
+  logo: 'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/itflix.png',
   background: 'https://i.imgur.com/mEHGqaJ.jpg',
   types: ['movie'],
   catalogs: [
