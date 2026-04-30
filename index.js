@@ -27,7 +27,8 @@ const manifest = {
     },
   ],
   resources: ['catalog', 'meta', 'stream'],
-  idPrefixes: ['itflixhd_'],
+  // Responde tanto a IDs próprios quanto a IDs do IMDB (tt...)
+  idPrefixes: ['itflixhd_', 'tt'],
   behaviorHints: { adult: false, p2p: true },
 };
 
@@ -68,12 +69,13 @@ async function getTmdbMeta(tmdbId) {
     const data = await res.json();
 
     tmdbCache[tmdbId] = {
-      poster:     data.poster_path   ? `${TMDB_POSTER}${data.poster_path}`   : null,
-      background: data.backdrop_path ? `${TMDB_BACK}${data.backdrop_path}`   : null,
-      description: data.overview     || '',
-      rating:     data.vote_average  ? String(data.vote_average.toFixed(1))  : '',
-      genres:     (data.genres || []).map(g => g.name),
-      runtime:    data.runtime       || null,
+      poster:      data.poster_path   ? `${TMDB_POSTER}${data.poster_path}`  : null,
+      background:  data.backdrop_path ? `${TMDB_BACK}${data.backdrop_path}`  : null,
+      description: data.overview      || '',
+      rating:      data.vote_average  ? String(data.vote_average.toFixed(1)) : '',
+      genres:      (data.genres || []).map(g => g.name),
+      runtime:     data.runtime       || null,
+      imdbId:      data.imdb_id       || null,
     };
 
     console.log(`🎬 TMDB carregado: ${tmdbId}`);
@@ -99,6 +101,16 @@ function streamId(stream) {
   return stream.infoHash
     ? stream.infoHash.toLowerCase()
     : Buffer.from(stream.title || stream.name || '').toString('hex').slice(0, 40);
+}
+
+// Busca stream pelo imdbId na lista
+function findByImdbId(streams, imdbId) {
+  return streams.find(s => s.imdbId && s.imdbId === imdbId);
+}
+
+// Busca stream pelo infoHash/id próprio
+function findByInternalId(streams, rawId) {
+  return streams.find(s => streamId(s) === rawId);
 }
 
 // ── Builder ───────────────────────────────────────────────────────────────────
@@ -140,7 +152,12 @@ builder.defineCatalogHandler(async ({ extra }) => {
 builder.defineMetaHandler(async ({ id }) => {
   const streams = await getStreams();
   const rawId = id.replace('itflixhd_', '');
-  const stream = streams.find(s => streamId(s) === rawId);
+
+  // Busca por ID interno ou por IMDB ID
+  const stream = rawId.startsWith('tt')
+    ? findByImdbId(streams, rawId)
+    : findByInternalId(streams, rawId);
+
   if (!stream) return { meta: null };
 
   const { name, year, fullTitle } = parseStreamTitle(stream);
@@ -169,7 +186,12 @@ builder.defineMetaHandler(async ({ id }) => {
 builder.defineStreamHandler(async ({ id }) => {
   const streams = await getStreams();
   const rawId = id.replace('itflixhd_', '');
-  const stream = streams.find(s => streamId(s) === rawId);
+
+  // Busca por IMDB ID (tt...) ou por ID interno
+  const stream = rawId.startsWith('tt')
+    ? findByImdbId(streams, rawId)
+    : findByInternalId(streams, rawId);
+
   if (!stream || !stream.infoHash) return { streams: [] };
 
   const { fullTitle } = parseStreamTitle(stream);
@@ -177,11 +199,11 @@ builder.defineStreamHandler(async ({ id }) => {
   return {
     streams: [
       {
-        name:  stream.name || 'ITFLIXHD',
-        title: fullTitle,
-        infoHash:  stream.infoHash.toLowerCase(),
-        fileIdx:   stream.fileIdx ?? 0,
-        sources:   stream.sources || [],
+        name:    stream.name || 'ITFLIXHD',
+        title:   fullTitle,
+        infoHash: stream.infoHash.toLowerCase(),
+        fileIdx:  stream.fileIdx ?? 0,
+        sources:  stream.sources || [],
         behaviorHints: { notWebReady: false },
       },
     ],
