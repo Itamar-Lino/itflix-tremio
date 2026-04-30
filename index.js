@@ -134,3 +134,4 @@ getFilmes().then(() => {
   serveHTTP(builder.getInterface(), { port: PORT });
   console.log(`\n🎬 ITFLIXHD rodando em http://localhost:${PORT}/manifest.json\n`);
 });
+
