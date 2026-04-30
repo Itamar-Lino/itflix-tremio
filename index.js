@@ -132,9 +132,11 @@ function parseStreamTitle(stream) {
 }
 
 function streamId(stream) {
-  return stream.infoHash
+  const base = stream.infoHash
     ? stream.infoHash.toLowerCase()
     : Buffer.from(stream.title || stream.name || '').toString('hex').slice(0, 40);
+  const idx = stream.fileIdx !== undefined ? stream.fileIdx : 0;
+  return `${base}_${idx}`;
 }
 
 function findByImdbId(streams, imdbId) {
