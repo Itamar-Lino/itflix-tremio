@@ -9,6 +9,11 @@ const FILMES_URL =
 const SERIES_URL =
   'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/series.json';
 
+// ── Real-Debrid API Key fixa ──────────────────────────────────────────────────
+// Cole sua API Key aqui (obtenha em real-debrid.com/apitoken)
+// Deixe como null para desativar o Real-Debrid
+const RD_API_KEY = null; // ex: 'ABCDEF123456...'
+
 const TMDB_API_KEY  = 'c311ad203b7db4a3bf1e1275ecdf41de';
 const TMDB_BASE     = 'https://api.themoviedb.org/3';
 const TMDB_POSTER   = 'https://image.tmdb.org/t/p/w500';
@@ -417,9 +422,9 @@ builder.defineMetaHandler(async ({ type, id }) => {
   return { meta: null };
 });
 
-// Stream handler — lê rdKey injetado via query pelo servidor customizado
+// Stream handler — usa rdKey da URL ou a key fixa definida acima
 builder.defineStreamHandler(async ({ type, id, extra }) => {
-  const rdKey = (extra && extra.rdKey) || null;
+  const rdKey = (extra && extra.rdKey) || RD_API_KEY || null;
 
   if (type === 'movie') {
     const streams = await getMovies();
