@@ -12,7 +12,7 @@ const SERIES_URL =
 // ── Real-Debrid API Key fixa ──────────────────────────────────────────────────
 // Cole sua API Key aqui (obtenha em real-debrid.com/apitoken)
 // Deixe como null para desativar o Real-Debrid
-const RD_API_KEY = null; // ex: 'ABCDEF123456...'
+const RD_API_KEY = "MOBD2BOZJKNISTJ56SAGMLZXT6673DZCFDLVEUKFVJ43X2S2USHA"; // ex: 'ABCDEF123456...'
 
 const TMDB_API_KEY  = 'c311ad203b7db4a3bf1e1275ecdf41de';
 const TMDB_BASE     = 'https://api.themoviedb.org/3';
