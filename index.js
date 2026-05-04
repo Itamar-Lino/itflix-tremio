@@ -4,10 +4,10 @@ const url  = require('url');
 
 // ── Configurações ─────────────────────────────────────────────────────────────
 const FILMES_URL =
-  'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/filmes.json';
+  'https://raw.githubusercontent.com/Itamar-Lino/itflix-tremio/refs/heads/main/filmes.json';
 
 const SERIES_URL =
-  'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/series.json';
+  'https://raw.githubusercontent.com/Itamar-Lino/itflix-tremio/refs/heads/main/series.json';
 
 // ── Real-Debrid API Key fixa ──────────────────────────────────────────────────
 // Cole sua API Key aqui (obtenha em real-debrid.com/apitoken)
@@ -127,8 +127,8 @@ const manifest = {
   version:     '1.5.0',
   name:        'ITFLIXHD',
   description: 'Assista filmes e series em HD. Suporte a Real-Debrid.',
-  logo:        'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/itflix.png',
-  background:  'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/background.jpg',
+  logo:        'https://raw.githubusercontent.com/Itamar-Lino/itflix-tremio/refs/heads/main/itflix.png',
+  background:  'https://raw.githubusercontent.com/Itamar-Lino/itflix-tremio/refs/heads/main/background.jpg',
   types:       ['movie', 'series'],
   catalogs: [
     { type: 'movie',  id: 'itflixhd-movies', name: 'ITFLIXHD - Filmes', extra: [{ name: 'search', isRequired: false }] },
@@ -608,7 +608,7 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 <body>
   <div class="card">
     <div class="logo">
-      <img src="https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/itflix.png" alt="logo"/>
+      <img src="https://raw.githubusercontent.com/Itamar-Lino/itflix-tremio/refs/heads/main/itflix.png" alt="logo"/>
       <h1>ITF<span>LIX</span>HD</h1>
     </div>
 
