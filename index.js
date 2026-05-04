@@ -16,6 +16,139 @@ const CACHE_TTL     = 30 * 60 * 1000;
 const TMDB_TTL      = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT = 7_000;
 
+// ── Real-Debrid ───────────────────────────────────────────────────────────────
+const RD_BASE = 'https://api.real-debrid.com/rest/1.0';
+
+// Extrai a API key do Real-Debrid da config (passada via URL como ?rd=XXXXX)
+function getRdKey(config) {
+  return (config && config.rd) ? config.rd.trim() : null;
+}
+
+// Verifica se a API key é válida
+async function rdCheckToken(apiKey) {
+  try {
+    const res = await fetchWithTimeout(
+      `${RD_BASE}/user`,
+      5000,
+      1,
+      { Authorization: `Bearer ${apiKey}` }
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Adiciona um magnet no Real-Debrid e aguarda ficar "downloaded"
+async function rdAddMagnet(apiKey, infoHash, sources) {
+  const trackers = (sources || [])
+    .filter(s => s.startsWith('tracker:'))
+    .map(s => s.replace('tracker:', ''))
+    .join('&tr=');
+
+  const magnet = `magnet:?xt=urn:btih:${infoHash}${trackers ? '&tr=' + trackers : ''}`;
+
+  // 1. Adiciona o magnet
+  const addRes = await fetchWithTimeout(`${RD_BASE}/torrents/addMagnet`, 10_000, 1, {
+    Authorization: `Bearer ${apiKey}`,
+  }, {
+    method: 'POST',
+    body: new URLSearchParams({ magnet }),
+  });
+  if (!addRes.ok) throw new Error(`RD addMagnet HTTP ${addRes.status}`);
+  const { id: torrentId } = await addRes.json();
+  if (!torrentId) throw new Error('RD: sem torrentId');
+
+  // 2. Seleciona os arquivos (all)
+  const selRes = await fetchWithTimeout(`${RD_BASE}/torrents/selectFiles/${torrentId}`, 8_000, 1, {
+    Authorization: `Bearer ${apiKey}`,
+  }, {
+    method: 'POST',
+    body: new URLSearchParams({ files: 'all' }),
+  });
+  if (!selRes.ok) console.warn(`RD selectFiles HTTP ${selRes.status}`);
+
+  // 3. Aguarda o torrent ficar disponível (poll até 15s)
+  for (let i = 0; i < 5; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const infoRes = await fetchWithTimeout(`${RD_BASE}/torrents/info/${torrentId}`, 8_000, 1, {
+      Authorization: `Bearer ${apiKey}`,
+    });
+    if (!infoRes.ok) continue;
+    const info = await infoRes.json();
+
+    if (info.status === 'downloaded') {
+      return info.links || [];
+    }
+    if (['error', 'virus', 'dead'].includes(info.status)) {
+      throw new Error(`RD torrent status: ${info.status}`);
+    }
+  }
+
+  throw new Error('RD: timeout aguardando download');
+}
+
+// Desbloqueia um link RD → retorna URL direta
+async function rdUnrestrictLink(apiKey, link) {
+  const res = await fetchWithTimeout(`${RD_BASE}/unrestrict/link`, 8_000, 1, {
+    Authorization: `Bearer ${apiKey}`,
+  }, {
+    method: 'POST',
+    body: new URLSearchParams({ link }),
+  });
+  if (!res.ok) throw new Error(`RD unrestrict HTTP ${res.status}`);
+  const data = await res.json();
+  return data.download || null;
+}
+
+// Tenta obter link direto via RD para um infoHash
+// Primeiro checa o cache de torrents já adicionados
+const rdTorrentCache = {};
+
+async function rdGetStreamUrl(apiKey, infoHash, sources, fileIdx = 0) {
+  try {
+    // Verifica se já tem este torrent adicionado no RD
+    const listRes = await fetchWithTimeout(`${RD_BASE}/torrents`, 8_000, 1, {
+      Authorization: `Bearer ${apiKey}`,
+    });
+
+    if (listRes.ok) {
+      const torrents = await listRes.json();
+      const existing = torrents.find(t =>
+        t.hash && t.hash.toLowerCase() === infoHash.toLowerCase() &&
+        t.status === 'downloaded'
+      );
+
+      if (existing) {
+        // Já está no RD → busca os links
+        const infoRes = await fetchWithTimeout(`${RD_BASE}/torrents/info/${existing.id}`, 8_000, 1, {
+          Authorization: `Bearer ${apiKey}`,
+        });
+        if (infoRes.ok) {
+          const info = await infoRes.json();
+          const links = info.links || [];
+          const link  = links[fileIdx] || links[0];
+          if (link) {
+            const url = await rdUnrestrictLink(apiKey, link);
+            return url;
+          }
+        }
+      }
+    }
+
+    // Ainda não está no RD → adiciona
+    const links = await rdAddMagnet(apiKey, infoHash, sources);
+    const link  = links[fileIdx] || links[0];
+    if (!link) throw new Error('RD: sem links após adicionar');
+
+    const url = await rdUnrestrictLink(apiKey, link);
+    return url;
+  } catch (err) {
+    console.error(`⚠️  RD erro para ${infoHash}:`, err.message);
+    return null;
+  }
+}
+
 const DEFAULT_TRACKERS = [
   'tracker:udp://tracker.openbittorrent.com:80/announce',
   'tracker:udp://tracker.opentrackr.org:1337/announce',
@@ -31,25 +164,34 @@ const DEFAULT_TRACKERS = [
   'tracker:https://tracker.tamersunion.org:443/announce',
 ];
 
-// ── Manifest ──────────────────────────────────────────────────────────────────
+// ── Manifest (com configuração de Real-Debrid) ────────────────────────────────
 const manifest = {
   id: 'com.itflixhd.addon',
-  version: '1.3.0',
+  version: '1.4.0',
   name: 'ITFLIXHD',
-  description: 'Assista filmes e séries em HD com o addon ITFLIXHD para Stremio.',
+  description: 'Assista filmes e séries em HD com o addon ITFLIXHD para Stremio. Suporte a Real-Debrid.',
   logo: 'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/itflix.png',
   background: 'https://i.imgur.com/mEHGqaJ.jpg',
   types: ['movie', 'series'],
+  // Configuração de Real-Debrid exposta na UI do Stremio
+  config: [
+    {
+      key:      'rd',
+      type:     'text',
+      title:    '🔑 Real-Debrid API Key (opcional)',
+      required: false,
+    },
+  ],
   catalogs: [
     {
       type: 'movie',
-      id: 'itflixhd-movies',
+      id:   'itflixhd-movies',
       name: 'ITFLIXHD – Filmes',
       extra: [{ name: 'search', isRequired: false }],
     },
     {
       type: 'series',
-      id: 'itflixhd-series',
+      id:   'itflixhd-series',
       name: 'ITFLIXHD – Séries',
       extra: [{ name: 'search', isRequired: false }],
     },
@@ -59,7 +201,7 @@ const manifest = {
   behaviorHints: { adult: false, p2p: true },
 };
 
-// ── pMap — declarado antes dos handlers para evitar hoisting bug ───────────────
+// ── pMap ──────────────────────────────────────────────────────────────────────
 async function pMap(items, fn, concurrency = 5) {
   const results = [];
   for (let i = 0; i < items.length; i += concurrency) {
@@ -71,12 +213,16 @@ async function pMap(items, fn, concurrency = 5) {
 }
 
 // ── Fetch com timeout e retry ─────────────────────────────────────────────────
-async function fetchWithTimeout(url, ms = FETCH_TIMEOUT, retries = 2) {
+async function fetchWithTimeout(url, ms = FETCH_TIMEOUT, retries = 2, headers = {}, opts = {}) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
     try {
-      const res = await fetch(url, { signal: controller.signal });
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers,
+        ...opts,
+      });
       clearTimeout(timer);
       return res;
     } catch (err) {
@@ -200,7 +346,7 @@ function mergeTrackers(sources) {
   return [...existing];
 }
 
-// Monta objeto de stream completo para o Stremio
+// Monta objeto de stream torrent (fallback sem RD)
 function buildStreamObj(s, extraHints = {}) {
   const quality = parseQuality(s);
   const audio   = parseAudio(s);
@@ -208,11 +354,25 @@ function buildStreamObj(s, extraHints = {}) {
   const fileIdx = typeof s.fileIdx === 'number' ? s.fileIdx : 0;
 
   return {
-    name:    `ITFLIXHD\n${label}`,
-    title:   s.title || s.name || '',
+    name:     `ITFLIXHD\n${label}`,
+    title:    s.title || s.name || '',
     infoHash: s.infoHash.toLowerCase(),
     fileIdx,
-    sources: mergeTrackers(s.sources),
+    sources:  mergeTrackers(s.sources),
+    ...(Object.keys(extraHints).length ? { behaviorHints: extraHints } : {}),
+  };
+}
+
+// Monta objeto de stream via Real-Debrid (HTTP direto)
+function buildRdStreamObj(s, url, extraHints = {}) {
+  const quality = parseQuality(s);
+  const audio   = parseAudio(s);
+  const label   = [quality, audio].filter(Boolean).join(' · ');
+
+  return {
+    name:  `⚡ RD | ITFLIXHD\n${label}`,
+    title: s.title || s.name || '',
+    url,
     ...(Object.keys(extraHints).length ? { behaviorHints: extraHints } : {}),
   };
 }
@@ -382,7 +542,9 @@ builder.defineMetaHandler(async ({ type, id }) => {
 });
 
 // ── Stream ────────────────────────────────────────────────────────────────────
-builder.defineStreamHandler(async ({ type, id }) => {
+builder.defineStreamHandler(async ({ type, id, config }) => {
+  const rdKey = getRdKey(config);
+
   if (type === 'movie') {
     const streams = await getMovies();
     const rawId   = id.replace('itflixhd_', '');
@@ -392,7 +554,29 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
     if (!stream || !stream.infoHash) return { streams: [] };
 
-    return { streams: [buildStreamObj(stream)] };
+    const result = [];
+
+    // Tenta Real-Debrid primeiro
+    if (rdKey) {
+      console.log(`🔑 RD: tentando desbloquear ${stream.infoHash}`);
+      const rdUrl = await rdGetStreamUrl(
+        rdKey,
+        stream.infoHash,
+        mergeTrackers(stream.sources),
+        typeof stream.fileIdx === 'number' ? stream.fileIdx : 0
+      );
+      if (rdUrl) {
+        console.log(`✅ RD: stream obtido para ${stream.infoHash}`);
+        result.push(buildRdStreamObj(stream, rdUrl));
+      } else {
+        console.warn(`⚠️  RD: falhou, usando torrent como fallback`);
+      }
+    }
+
+    // Sempre adiciona o torrent como fallback (ou única opção se sem RD)
+    result.push(buildStreamObj(stream));
+
+    return { streams: result };
   }
 
   if (type === 'series') {
@@ -412,12 +596,31 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
     if (!matched.length) return { streams: [] };
 
-    // bingeGroup: permite autoplay do próximo episódio no Stremio
     const bingeGroup = `itflixhd-${imdbId}-s${String(season).padStart(2, '0')}`;
+    const result     = [];
 
-    return {
-      streams: matched.map(s => buildStreamObj(s, { bingeGroup })),
-    };
+    for (const s of matched) {
+      // Tenta Real-Debrid
+      if (rdKey && s.infoHash) {
+        console.log(`🔑 RD: tentando desbloquear série ${s.infoHash}`);
+        const rdUrl = await rdGetStreamUrl(
+          rdKey,
+          s.infoHash,
+          mergeTrackers(s.sources),
+          typeof s.fileIdx === 'number' ? s.fileIdx : 0
+        );
+        if (rdUrl) {
+          console.log(`✅ RD: stream obtido para ${s.infoHash}`);
+          result.push(buildRdStreamObj(s, rdUrl, { bingeGroup }));
+          continue; // Não adiciona o torrent se RD funcionou
+        }
+        console.warn(`⚠️  RD: falhou para ${s.infoHash}, usando torrent`);
+      }
+
+      result.push(buildStreamObj(s, { bingeGroup }));
+    }
+
+    return { streams: result };
   }
 
   return { streams: [] };
@@ -428,5 +631,6 @@ const PORT = process.env.PORT || 7000;
 
 Promise.all([getMovies(), getSeriesStreams()]).then(() => {
   serveHTTP(builder.getInterface(), { port: PORT });
-  console.log(`\n🎬 ITFLIXHD v1.3.0 rodando em http://localhost:${PORT}/manifest.json\n`);
+  console.log(`\n🎬 ITFLIXHD v1.4.0 rodando em http://localhost:${PORT}/manifest.json\n`);
+  console.log(`⚡ Real-Debrid: configure sua API Key ao instalar o addon no Stremio\n`);
 });
