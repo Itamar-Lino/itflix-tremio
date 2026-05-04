@@ -477,7 +477,7 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
   <title>ITFLIXHD - Configurar</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -582,6 +582,20 @@ const CONFIG_PAGE = `<!DOCTYPE html>
       margin-top: 14px;
       line-height: 1.5;
     }
+    #copy-btn {
+      display: none;
+      margin-top: 8px;
+      background: #2a2a4a;
+      color: #fff;
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 10px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      width: 100%;
+    }
+    #copy-btn:active { background: #3a3a6a; }
     .divider {
       border: none;
       border-top: 1px solid #2a2a4a;
@@ -600,14 +614,15 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 
     <div class="section">
       <label>Real-Debrid API Key <span class="badge">opcional</span></label>
-      <input type="text" id="rd-key" placeholder="Cole sua API Key aqui..."/>
+      <input type="text" id="rd-key" placeholder="Cole sua API Key aqui..." autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"/>
       <p class="hint">Obtenha em <a href="https://real-debrid.com/apitoken" target="_blank">real-debrid.com/apitoken</a></p>
     </div>
 
-    <button class="btn" onclick="instalar()">Instalar no Stremio</button>
-    <button class="btn btn-outline" onclick="copiarLink()">Copiar link do manifest</button>
+    <button class="btn" onclick="instalar()">&#9654; Instalar no Stremio</button>
+    <button class="btn btn-outline" onclick="copiarLink()">&#128203; Copiar link do manifest</button>
 
     <div id="link-box"></div>
+    <button id="copy-btn" onclick="copiarDoBox()">&#128203; Copiar link</button>
 
     <hr class="divider"/>
 
@@ -619,31 +634,84 @@ const CONFIG_PAGE = `<!DOCTYPE html>
   </div>
 
   <script>
+    var _manifestUrl = '';
+
     function buildManifestUrl() {
-      const rdKey = document.getElementById('rd-key').value.trim();
-      const base  = window.location.origin;
+      var rdKey = document.getElementById('rd-key').value.trim();
+      var base  = window.location.origin;
       return rdKey
         ? base + '/' + encodeURIComponent(rdKey) + '/manifest.json'
         : base + '/manifest.json';
     }
 
+    function mostrarLink(url, mensagem) {
+      _manifestUrl = url;
+      var box = document.getElementById('link-box');
+      var btn = document.getElementById('copy-btn');
+      box.style.display = 'block';
+      btn.style.display = 'block';
+      if (mensagem) {
+        box.innerHTML = '<strong style="color:#aaa">' + mensagem + '</strong><br/><br/>' + url;
+      } else {
+        box.textContent = url;
+      }
+    }
+
     function instalar() {
-      const manifestUrl = buildManifestUrl();
-      // Tenta abrir o Stremio; se falhar mostra o link
-      window.location.href = 'stremio://' + manifestUrl.replace(/^https?:\\/\\//, '');
-      setTimeout(() => {
-        const box = document.getElementById('link-box');
-        box.style.display = 'block';
-        box.innerHTML = '<strong style="color:#aaa">Caso o Stremio nao abra, cole este link em Addons > Instalar do URL:</strong><br/><br/>' + manifestUrl;
-      }, 1500);
+      var manifestUrl = buildManifestUrl();
+      var stremioUrl  = 'stremio://' + manifestUrl.replace(/^https?:\\/\\//, '');
+
+      // Tenta abrir o app Stremio
+      var iframe = document.createElement('iframe');
+      iframe.style.display = 'none';
+      iframe.src = stremioUrl;
+      document.body.appendChild(iframe);
+      setTimeout(function() { document.body.removeChild(iframe); }, 2000);
+
+      // Também tenta window.location como fallback
+      setTimeout(function() {
+        window.location.href = stremioUrl;
+      }, 100);
+
+      // Mostra o link para instalar manualmente após 2s
+      setTimeout(function() {
+        mostrarLink(manifestUrl, 'Se o Stremio nao abrir automaticamente, copie este link e cole em Addons > Instalar do URL:');
+      }, 2000);
     }
 
     function copiarLink() {
-      const manifestUrl = buildManifestUrl();
-      navigator.clipboard.writeText(manifestUrl).catch(() => {});
-      const box = document.getElementById('link-box');
-      box.style.display = 'block';
-      box.textContent   = manifestUrl;
+      var manifestUrl = buildManifestUrl();
+      mostrarLink(manifestUrl, null);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(manifestUrl).then(function() {
+          document.getElementById('copy-btn').textContent = '\\u2714 Copiado!';
+          setTimeout(function() {
+            document.getElementById('copy-btn').textContent = '\\u{1F4CB} Copiar link';
+          }, 2000);
+        }).catch(function() {});
+      }
+    }
+
+    function copiarDoBox() {
+      if (!_manifestUrl) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(_manifestUrl).then(function() {
+          document.getElementById('copy-btn').textContent = '\\u2714 Copiado!';
+          setTimeout(function() {
+            document.getElementById('copy-btn').textContent = '\\u{1F4CB} Copiar link';
+          }, 2000);
+        }).catch(function() {
+          // fallback para mobile antigo
+          var el = document.createElement('textarea');
+          el.value = _manifestUrl;
+          el.style.position = 'fixed';
+          el.style.opacity = '0';
+          document.body.appendChild(el);
+          el.focus(); el.select();
+          try { document.execCommand('copy'); } catch(e){}
+          document.body.removeChild(el);
+        });
+      }
     }
   </script>
 </body>
@@ -659,10 +727,13 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 //   GET /stream/...                 → streams sem RD
 
 const PORT       = process.env.PORT || 7000;
+// Se definir ADDON_URL no ambiente, usa ela como base pública (ex: https://meuaddon.onrender.com)
+const ADDON_URL  = (process.env.ADDON_URL || '').replace(/\/$/, '');
 const addonIface = builder.getInterface();
 const sdkRouter  = getRouter(addonIface);
 
 function getBaseUrl(req) {
+  if (ADDON_URL) return ADDON_URL;
   const host  = req.headers.host || `localhost:${PORT}`;
   const proto = (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
   return `${proto}://${host}`;
@@ -690,9 +761,10 @@ function handleRequest(req, res) {
   // ── Manifest base (sem rdKey na URL) ──────────────────────────────────────
   // configurationRequired: true → Stremio mostra a engrenagem ⚙️
   if (pathname === '/manifest.json') {
+    const base = getBaseUrl(req);
     return sendJson(res, {
       ...manifest,
-      configureUrl:  `${baseUrl}/configure`,
+      configureUrl:  `${base}/configure`,
       behaviorHints: { ...manifest.behaviorHints, configurationRequired: true },
     });
   }
@@ -707,9 +779,10 @@ function handleRequest(req, res) {
 
     // /:rdKey/manifest.json — configurationRequired: false (já configurado)
     if (subPath === '/manifest.json') {
+      const base = getBaseUrl(req);
       return sendJson(res, {
         ...manifest,
-        configureUrl:  `${baseUrl}/configure`,
+        configureUrl:  `${base}/configure`,
         behaviorHints: { ...manifest.behaviorHints, configurationRequired: false },
       });
     }
@@ -733,6 +806,8 @@ Promise.all([getMovies(), getSeriesStreams()]).then(() => {
     console.log(`\nITFLIXHD v1.5.0 rodando`);
     console.log(`Configuracao:  http://localhost:${PORT}/`);
     console.log(`Manifest:      http://localhost:${PORT}/manifest.json`);
-    console.log(`Com RD:        http://localhost:${PORT}/SUA_KEY/manifest.json\n`);
+    console.log(`Com RD:        http://localhost:${PORT}/SUA_KEY/manifest.json`);
+    if (ADDON_URL) console.log(`URL publica:   ${ADDON_URL}`);
+    console.log('');
   });
 });
