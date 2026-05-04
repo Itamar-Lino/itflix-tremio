@@ -128,7 +128,7 @@ const manifest = {
   name:        'ITFLIXHD',
   description: 'Assista filmes e series em HD. Suporte a Real-Debrid.',
   logo:        'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/itflix.png',
-  background:  'https://i.imgur.com/mEHGqaJ.jpg',
+  background:  'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/background.jpg',
   types:       ['movie', 'series'],
   catalogs: [
     { type: 'movie',  id: 'itflixhd-movies', name: 'ITFLIXHD - Filmes', extra: [{ name: 'search', isRequired: false }] },
@@ -717,6 +717,59 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 </body>
 </html>`;
 
+// ── Handler de stream com RD (interceptado antes do SDK) ─────────────────────
+async function handleStreamWithRd(res, type, id, rdKey) {
+  try {
+    let streamsResult = [];
+
+    if (type === 'movie') {
+      const streams = await getMovies();
+      const rawId   = id.replace('itflixhd_', '');
+      const stream  = rawId.startsWith('tt') ? findByImdbId(streams, rawId) : findByInternalId(streams, rawId);
+      if (!stream || !stream.infoHash) { sendJson(res, { streams: [] }); return; }
+
+      const result = [];
+      if (rdKey) {
+        const rdUrl = await rdGetStreamUrl(rdKey, stream.infoHash, mergeTrackers(stream.sources), stream.fileIdx ?? 0);
+        if (rdUrl) result.push(buildRdStreamObj(stream, rdUrl));
+      }
+      result.push(buildStreamObj(stream));
+      streamsResult = result;
+
+    } else if (type === 'series') {
+      const parts = id.split(':');
+      if (parts.length < 3) { sendJson(res, { streams: [] }); return; }
+      const [imdbId, seasonStr, episodeStr] = parts;
+      const season  = parseInt(seasonStr,  10);
+      const episode = parseInt(episodeStr, 10);
+
+      const allStreams = await getSeriesStreams();
+      const matched   = allStreams.filter(s => {
+        if (s.imdbId !== imdbId) return false;
+        const ep = parseEpisodeInfo(s.title || s.name || '');
+        return ep.season === season && ep.episode === episode;
+      });
+      if (!matched.length) { sendJson(res, { streams: [] }); return; }
+
+      const bingeGroup = 'itflixhd-' + imdbId + '-s' + String(season).padStart(2, '0');
+      const result     = [];
+      for (const s of matched) {
+        if (rdKey && s.infoHash) {
+          const rdUrl = await rdGetStreamUrl(rdKey, s.infoHash, mergeTrackers(s.sources), s.fileIdx ?? 0);
+          if (rdUrl) { result.push(buildRdStreamObj(s, rdUrl, { bingeGroup })); continue; }
+        }
+        result.push(buildStreamObj(s, { bingeGroup }));
+      }
+      streamsResult = result;
+    }
+
+    sendJson(res, { streams: streamsResult });
+  } catch (err) {
+    console.error('handleStreamWithRd erro:', err.message);
+    sendJson(res, { streams: [] });
+  }
+}
+
 // ── Servidor HTTP Customizado ─────────────────────────────────────────────────
 // Rotas:
 //   GET /                           → página de configuração
@@ -771,13 +824,14 @@ function handleRequest(req, res) {
 
   // ── Detecta rdKey no primeiro segmento /:rdKey/... ────────────────────────
   const sdkPaths = ['manifest.json', 'stream', 'meta', 'catalog'];
-  const firstSeg = pathname.split('/').filter(Boolean)[0] || '';
+  const segments  = pathname.split('/').filter(Boolean);
+  const firstSeg  = segments[0] || '';
 
   if (firstSeg && !sdkPaths.includes(firstSeg)) {
     const rdKey   = decodeURIComponent(firstSeg);
-    const subPath = pathname.slice(firstSeg.length + 1) || '/';
+    const subPath = '/' + segments.slice(1).join('/');
 
-    // /:rdKey/manifest.json — configurationRequired: false (já configurado)
+    // /:rdKey/manifest.json — configurationRequired: false (ja configurado)
     if (subPath === '/manifest.json') {
       const base = getBaseUrl(req);
       return sendJson(res, {
@@ -787,10 +841,19 @@ function handleRequest(req, res) {
       });
     }
 
-    // Injeta rdKey para o stream handler via query param
-    const sep = subPath.includes('?') ? '&' : '?';
-    req.url   = subPath + sep + 'rdKey=' + encodeURIComponent(rdKey);
-    console.log(`RD Key detectada: ${rdKey.slice(0, 8)}... → ${req.url}`);
+    // Intercepta /:rdKey/stream/:type/:id.json diretamente
+    // O SDK nao repassa query params como extra, entao tratamos manualmente.
+    const streamMatch = subPath.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
+    if (streamMatch) {
+      const sType = streamMatch[1];
+      const sId   = decodeURIComponent(streamMatch[2]);
+      console.log('RD Key detectada: ' + rdKey.slice(0, 8) + '... -> stream/' + sType + '/' + sId);
+      return handleStreamWithRd(res, sType, sId, rdKey);
+    }
+
+    // Para catalog/meta — reescreve URL e deixa o SDK tratar
+    req.url = subPath + (parsed.search || '');
+    console.log('RD Key detectada (catalog/meta): ' + rdKey.slice(0, 8) + '... -> ' + req.url);
   }
 
   // Passa para o router do SDK
