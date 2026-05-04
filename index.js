@@ -9,11 +9,6 @@ const FILMES_URL =
 const SERIES_URL =
   'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/series.json';
 
-// ── Real-Debrid API Key fixa ──────────────────────────────────────────────────
-// Cole sua API Key aqui (obtenha em real-debrid.com/apitoken)
-// Deixe como null para desativar o Real-Debrid
-const RD_API_KEY = ''; // ex: 'ABCDEF123456...'
-
 const TMDB_API_KEY  = 'c311ad203b7db4a3bf1e1275ecdf41de';
 const TMDB_BASE     = 'https://api.themoviedb.org/3';
 const TMDB_POSTER   = 'https://image.tmdb.org/t/p/w500';
@@ -121,10 +116,12 @@ const DEFAULT_TRACKERS = [
   'tracker:https://tracker.tamersunion.org:443/announce',
 ];
 
-// ── Manifest ──────────────────────────────────────────────────────────────────
+// ── Manifest com userConfiguration ───────────────────────────────────────────
+// O campo "config" é o mecanismo oficial do Stremio para cada utilizador
+// inserir os seus próprios dados (como a API Key) no momento da instalação.
 const manifest = {
   id:          'com.itflixhd.addon',
-  version:     '1.5.0',
+  version:     '1.6.0',
   name:        'ITFLIXHD',
   description: 'Assista filmes e series em HD. Suporte a Real-Debrid.',
   logo:        'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/itflix.png',
@@ -134,10 +131,18 @@ const manifest = {
     { type: 'movie',  id: 'itflixhd-movies', name: 'ITFLIXHD - Filmes', extra: [{ name: 'search', isRequired: false }] },
     { type: 'series', id: 'itflixhd-series', name: 'ITFLIXHD - Series', extra: [{ name: 'search', isRequired: false }] },
   ],
-  resources:        ['catalog', 'meta', 'stream'],
-  idPrefixes:       ['itflixhd_', 'tt'],
-  behaviorHints:    { adult: false, p2p: true },
-  configurationUrl: 'https://itflix-tremio.onrender.com/configure',
+  resources:     ['catalog', 'meta', 'stream'],
+  idPrefixes:    ['itflixhd_', 'tt'],
+  behaviorHints: { adult: false, p2p: true, configurable: true, configurationRequired: false },
+  // ★ CAMPO CHAVE: cada utilizador insere a sua própria API Key aqui
+  config: [
+    {
+      key:      'rdKey',
+      type:     'text',
+      title:    'Real-Debrid API Key',
+      required: false,
+    },
+  ],
 };
 
 // ── pMap ──────────────────────────────────────────────────────────────────────
@@ -423,9 +428,20 @@ builder.defineMetaHandler(async ({ type, id }) => {
   return { meta: null };
 });
 
-// Stream handler — usa rdKey da URL ou a key fixa definida acima
+// ── Stream handler ────────────────────────────────────────────────────────────
+// A rdKey agora vem de TRÊS fontes (em ordem de prioridade):
+//   1. extra.configuration.rdKey  → userConfig oficial do Stremio (novo)
+//   2. extra.rdKey                → fallback via query string (URL antiga)
+//   3. null                       → sem Real-Debrid
 builder.defineStreamHandler(async ({ type, id, extra }) => {
-  const rdKey = (extra && extra.rdKey) || RD_API_KEY || null;
+  const rdKey =
+    (extra && extra.configuration && extra.configuration.rdKey) ||
+    (extra && extra.rdKey) ||
+    null;
+
+  if (rdKey) {
+    console.log(`Stream com RD Key: ${rdKey.slice(0, 8)}...`);
+  }
 
   if (type === 'movie') {
     const streams = await getMovies();
@@ -615,14 +631,28 @@ const CONFIG_PAGE = `<!DOCTYPE html>
     <p class="info">
       <strong>Sem Real-Debrid:</strong> os streams usam torrent direto no Stremio.<br/><br/>
       <strong>Com Real-Debrid:</strong> os streams aparecem como links HTTP diretos,
-      mais rapidos e sem precisar de VPN.
+      mais rapidos e sem precisar de VPN.<br/><br/>
+      <strong>Nota:</strong> A API Key fica salva apenas no seu Stremio.
+      Cada pessoa instala com a sua propria chave.
     </p>
   </div>
 
   <script>
+    // ── Detecta se há uma key já na URL (ex: /configure/MYKEY123) ──────────────
+    (function() {
+      const parts = window.location.pathname.split('/').filter(Boolean);
+      // /configure está em partes[0]; se houver partes[1], é a rdKey
+      if (parts.length >= 2 && parts[0] === 'configure') {
+        document.getElementById('rd-key').value = decodeURIComponent(parts[1]);
+      }
+    })();
+
     function buildManifestUrl() {
       const rdKey = document.getElementById('rd-key').value.trim();
       const base  = window.location.origin;
+      // Gera URL no formato /:rdKey/manifest.json (compatibilidade) OU
+      // usa o userConfig embutido no manifest quando o Stremio suportar.
+      // Para instalação manual, o formato /:rdKey/manifest.json ainda funciona.
       return rdKey
         ? base + '/' + encodeURIComponent(rdKey) + '/manifest.json'
         : base + '/manifest.json';
@@ -630,12 +660,13 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 
     function instalar() {
       const manifestUrl = buildManifestUrl();
-      // Tenta abrir o Stremio; se falhar mostra o link
       window.location.href = 'stremio://' + manifestUrl.replace(/^https?:\\/\\//, '');
       setTimeout(() => {
         const box = document.getElementById('link-box');
         box.style.display = 'block';
-        box.innerHTML = '<strong style="color:#aaa">Caso o Stremio nao abra, cole este link em Addons > Instalar do URL:</strong><br/><br/>' + manifestUrl;
+        box.innerHTML =
+          '<strong style="color:#aaa">Caso o Stremio nao abra, cole este link em Addons &gt; Instalar do URL:</strong><br/><br/>' +
+          manifestUrl;
       }, 1500);
     }
 
@@ -652,12 +683,12 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 
 // ── Servidor HTTP Customizado ─────────────────────────────────────────────────
 // Rotas:
-//   GET /                      → página de configuração
-//   GET /configure             → página de configuração
-//   GET /manifest.json         → manifest (sem RD)
-//   GET /:rdKey/manifest.json  → manifest (com RD na URL)
-//   GET /:rdKey/stream/...     → streams com RD injetado via extra.rdKey
-//   GET /stream/...            → streams sem RD
+//   GET /                       → página de configuração
+//   GET /configure              → página de configuração
+//   GET /configure/:rdKey       → página de configuração com key pré-preenchida
+//   GET /manifest.json          → manifest (sem RD)
+//   GET /:rdKey/manifest.json   → manifest (com RD na URL — compatibilidade)
+//   GET /:rdKey/stream/...      → streams com RD injetado via extra.rdKey
 
 const PORT       = process.env.PORT || 7000;
 const addonIface = builder.getInterface();
@@ -667,27 +698,25 @@ function handleRequest(req, res) {
   const parsed   = url.parse(req.url, true);
   const pathname = parsed.pathname;
 
-  // Página de configuração
-  if (pathname === '/' || pathname === '/configure') {
+  // Página de configuração (com ou sem key pré-preenchida na URL)
+  if (pathname === '/' || pathname === '/configure' || pathname.startsWith('/configure/')) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(CONFIG_PAGE);
   }
 
   // /:rdKey/<recurso> — detecta rdKey no primeiro segmento da URL
-  // O rdKey nunca vai ser "manifest.json", "stream", "meta", "catalog"
   const sdkPaths = ['manifest.json', 'stream', 'meta', 'catalog'];
   const firstSeg = pathname.split('/').filter(Boolean)[0] || '';
 
   if (firstSeg && !sdkPaths.includes(firstSeg)) {
-    // É uma URL com rdKey
     const rdKey   = decodeURIComponent(firstSeg);
     const subPath = pathname.replace('/' + firstSeg, '') || '/';
 
-    // Injeta rdKey como query param extra para o stream handler
-    const sep     = subPath.includes('?') ? '&' : '?';
-    req.url       = subPath + sep + 'rdKey=' + encodeURIComponent(rdKey);
+    // Injeta rdKey como query param para o stream handler (fallback)
+    const sep = subPath.includes('?') ? '&' : '?';
+    req.url   = subPath + sep + 'rdKey=' + encodeURIComponent(rdKey);
 
-    console.log(`RD Key detectada: ${rdKey.slice(0, 8)}... → ${req.url}`);
+    console.log(`RD Key via URL: ${rdKey.slice(0, 8)}... → ${subPath}`);
   }
 
   // Passa para o router do SDK
@@ -700,7 +729,7 @@ function handleRequest(req, res) {
 // ── Start ─────────────────────────────────────────────────────────────────────
 Promise.all([getMovies(), getSeriesStreams()]).then(() => {
   http.createServer(handleRequest).listen(PORT, () => {
-    console.log(`\nITFLIXHD v1.5.0 rodando`);
+    console.log(`\nITFLIXHD v1.6.0 rodando`);
     console.log(`Configuracao:  http://localhost:${PORT}/`);
     console.log(`Manifest:      http://localhost:${PORT}/manifest.json`);
     console.log(`Com RD:        http://localhost:${PORT}/SUA_KEY/manifest.json\n`);
@@ -716,4 +745,4 @@ setInterval(async () => {
   } catch (e) {
     console.warn('[Keep-alive] falhou:', e.message);
   }
-}, 10 * 60 * 1000); // ping a cada 10 minutos
+}, 10 * 60 * 1000);
