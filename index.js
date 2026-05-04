@@ -133,6 +133,7 @@ const manifest = {
   ],
   resources:     ['catalog', 'meta', 'stream'],
   idPrefixes:    ['itflixhd_', 'tt'],
+  configurationUrl: 'https://itflix-tremio.onrender.com/configure',
   behaviorHints: { adult: false, p2p: true, configurable: true, configurationRequired: false },
   // ★ CAMPO CHAVE: cada utilizador insere a sua própria API Key aqui
   config: [
@@ -736,8 +737,37 @@ function handleRequest(req, res) {
   if (firstSeg && !sdkPaths.includes(firstSeg)) {
     const rdKey   = decodeURIComponent(firstSeg);
     const subPath = pathname.replace('/' + firstSeg, '') || '/';
+    const base    = `https://${req.headers.host}`;
 
-    // Injeta rdKey como query param para o stream handler (fallback)
+    // ── /:rdKey/manifest.json → retorna manifest personalizado com a key ──────
+    // O Stremio usa esse manifest para todas as requisições seguintes.
+    // O manifest tem a rdKey embutida no ID e nas URLs, então o Stremio
+    // sempre envia as requisições com a key na URL.
+    if (subPath === '/manifest.json' || subPath === '/manifest.json/') {
+      const customManifest = {
+        ...manifest,
+        // ID único por key: evita conflito se a pessoa mudar a key
+        id: `com.itflixhd.addon.${Buffer.from(rdKey).toString('hex').slice(0, 12)}`,
+        // Todas as URLs de recursos já incluem a rdKey
+        catalogPrefix: `${base}/${encodeURIComponent(rdKey)}`,
+        // configurationUrl com a key pré-preenchida
+        configurationUrl: `${base}/${encodeURIComponent(rdKey)}/configure`,
+        // behaviorHints: marca como configurado (não pede config de novo)
+        behaviorHints: {
+          ...manifest.behaviorHints,
+          configurable: true,
+          configurationRequired: false,
+        },
+      };
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+      });
+      console.log(`Manifest com RD Key: ${rdKey.slice(0, 8)}...`);
+      return res.end(JSON.stringify(customManifest));
+    }
+
+    // Injeta rdKey como query param para stream/meta/catalog handlers
     const sep = subPath.includes('?') ? '&' : '?';
     req.url   = subPath + sep + 'rdKey=' + encodeURIComponent(rdKey);
 
