@@ -638,12 +638,25 @@ const CONFIG_PAGE = `<!DOCTYPE html>
   </div>
 
   <script>
-    // ── Detecta se há uma key já na URL (ex: /configure/MYKEY123) ──────────────
+    // ── Detecta a rdKey na URL em qualquer formato ────────────────────────────
+    // Formatos possíveis que o Stremio usa:
+    //   /configure                  → sem key
+    //   /configure/MYKEY            → key após /configure/
+    //   /MYKEY/configure            → key antes de /configure (formato Stremio)
     (function() {
       const parts = window.location.pathname.split('/').filter(Boolean);
-      // /configure está em partes[0]; se houver partes[1], é a rdKey
+      let rdKey = null;
+
       if (parts.length >= 2 && parts[0] === 'configure') {
-        document.getElementById('rd-key').value = decodeURIComponent(parts[1]);
+        // /configure/MYKEY
+        rdKey = parts[1];
+      } else if (parts.length >= 2 && parts[parts.length - 1] === 'configure') {
+        // /MYKEY/configure  ← formato que o Stremio usa ao clicar na engrenagem
+        rdKey = parts[parts.length - 2];
+      }
+
+      if (rdKey) {
+        document.getElementById('rd-key').value = decodeURIComponent(rdKey);
       }
     })();
 
@@ -697,16 +710,28 @@ const sdkRouter  = getRouter(addonIface);
 function handleRequest(req, res) {
   const parsed   = url.parse(req.url, true);
   const pathname = parsed.pathname;
+  const segments = pathname.split('/').filter(Boolean);
+  const lastSeg  = segments[segments.length - 1] || '';
 
-  // Página de configuração (com ou sem key pré-preenchida na URL)
-  if (pathname === '/' || pathname === '/configure' || pathname.startsWith('/configure/')) {
+  // Página de configuração — todos os formatos:
+  //   /
+  //   /configure
+  //   /configure/:rdKey
+  //   /:rdKey/configure   <- formato que o Stremio usa ao clicar na engrenagem
+  const isConfigRoute =
+    pathname === '/' ||
+    pathname === '/configure' ||
+    pathname.startsWith('/configure/') ||
+    (segments.length >= 2 && lastSeg === 'configure');
+
+  if (isConfigRoute) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(CONFIG_PAGE);
   }
 
   // /:rdKey/<recurso> — detecta rdKey no primeiro segmento da URL
   const sdkPaths = ['manifest.json', 'stream', 'meta', 'catalog'];
-  const firstSeg = pathname.split('/').filter(Boolean)[0] || '';
+  const firstSeg = segments[0] || '';
 
   if (firstSeg && !sdkPaths.includes(firstSeg)) {
     const rdKey   = decodeURIComponent(firstSeg);
