@@ -136,11 +136,7 @@ const manifest = {
   ],
   resources:     ['catalog', 'meta', 'stream'],
   idPrefixes:    ['itflixhd_', 'tt'],
-  behaviorHints: {
-    adult: false,
-    p2p:   true,
-    configurationRequired: true,
-  },
+  behaviorHints: { adult: false, p2p: true, configurationRequired: true },
 };
 
 // ── pMap ──────────────────────────────────────────────────────────────────────
@@ -657,61 +653,68 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 // Rotas:
 //   GET /                           → página de configuração
 //   GET /configure                  → página de configuração
-//   GET /manifest.json              → manifest base (mostra engrenagem ⚙️ no Stremio)
-//   GET /:rdKey/manifest.json       → manifest com RD (sem configurationRequired)
-//   GET /:rdKey/stream/...          → streams com RD injetado via extra.rdKey
+//   GET /manifest.json              → manifest base (engrenagem ⚙️ no Stremio)
+//   GET /:rdKey/manifest.json       → manifest com RD ativo
+//   GET /:rdKey/stream/...          → streams com RD
 //   GET /stream/...                 → streams sem RD
 
 const PORT       = process.env.PORT || 7000;
 const addonIface = builder.getInterface();
 const sdkRouter  = getRouter(addonIface);
 
+function getBaseUrl(req) {
+  const host  = req.headers.host || `localhost:${PORT}`;
+  const proto = (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
+  return `${proto}://${host}`;
+}
+
+function sendJson(res, obj) {
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.end(JSON.stringify(obj));
+}
+
 function handleRequest(req, res) {
   const parsed   = url.parse(req.url, true);
   const pathname = parsed.pathname;
+  const baseUrl  = getBaseUrl(req);
 
-  // Detecta o host para montar URLs dinamicamente
-  const host    = req.headers.host || `localhost:${PORT}`;
-  const proto   = (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
-  const baseUrl = `${proto}://${host}`;
-
-  // Página de configuração
+  // ── Página de configuração ─────────────────────────────────────────────────
   if (pathname === '/' || pathname === '/configure') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(CONFIG_PAGE);
   }
 
-  // Manifest base — o Stremio mostra a engrenagem ⚙️ porque configurationRequired=true
+  // ── Manifest base (sem rdKey na URL) ──────────────────────────────────────
+  // configurationRequired: true → Stremio mostra a engrenagem ⚙️
   if (pathname === '/manifest.json') {
-    const m = {
+    return sendJson(res, {
       ...manifest,
-      configureUrl: `${baseUrl}/configure`,
+      configureUrl:  `${baseUrl}/configure`,
       behaviorHints: { ...manifest.behaviorHints, configurationRequired: true },
-    };
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
-    return res.end(JSON.stringify(m));
+    });
   }
 
-  // /:rdKey/<recurso> — detecta rdKey no primeiro segmento da URL
+  // ── Detecta rdKey no primeiro segmento /:rdKey/... ────────────────────────
   const sdkPaths = ['manifest.json', 'stream', 'meta', 'catalog'];
   const firstSeg = pathname.split('/').filter(Boolean)[0] || '';
 
   if (firstSeg && !sdkPaths.includes(firstSeg)) {
     const rdKey   = decodeURIComponent(firstSeg);
-    const subPath = pathname.replace('/' + firstSeg, '') || '/';
+    const subPath = pathname.slice(firstSeg.length + 1) || '/';
 
-    // Manifest com rdKey — configurationRequired=false (addon já configurado)
-    if (subPath === '/manifest.json' || subPath === '') {
-      const m = {
+    // /:rdKey/manifest.json — configurationRequired: false (já configurado)
+    if (subPath === '/manifest.json') {
+      return sendJson(res, {
         ...manifest,
-        configureUrl: `${baseUrl}/configure`,
+        configureUrl:  `${baseUrl}/configure`,
         behaviorHints: { ...manifest.behaviorHints, configurationRequired: false },
-      };
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
-      return res.end(JSON.stringify(m));
+      });
     }
 
-    // Injeta rdKey como query param extra para o stream handler
+    // Injeta rdKey para o stream handler via query param
     const sep = subPath.includes('?') ? '&' : '?';
     req.url   = subPath + sep + 'rdKey=' + encodeURIComponent(rdKey);
     console.log(`RD Key detectada: ${rdKey.slice(0, 8)}... → ${req.url}`);
