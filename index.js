@@ -12,7 +12,7 @@ const SERIES_URL =
 // ── Real-Debrid API Key fixa ──────────────────────────────────────────────────
 // Cole sua API Key aqui (obtenha em real-debrid.com/apitoken)
 // Deixe como null para desativar o Real-Debrid
-const RD_API_KEY = 'MOBD2BOZJKNISTJ56SAGMLZXT6673DZCFDLVEUKFVJ43X2S2USHA'; // ex: 'ABCDEF123456...'
+const RD_API_KEY = ''; // ex: 'ABCDEF123456...'
 
 const TMDB_API_KEY  = 'c311ad203b7db4a3bf1e1275ecdf41de';
 const TMDB_BASE     = 'https://api.themoviedb.org/3';
@@ -134,9 +134,10 @@ const manifest = {
     { type: 'movie',  id: 'itflixhd-movies', name: 'ITFLIXHD - Filmes', extra: [{ name: 'search', isRequired: false }] },
     { type: 'series', id: 'itflixhd-series', name: 'ITFLIXHD - Series', extra: [{ name: 'search', isRequired: false }] },
   ],
-  resources:     ['catalog', 'meta', 'stream'],
-  idPrefixes:    ['itflixhd_', 'tt'],
-  behaviorHints: { adult: false, p2p: true },
+  resources:        ['catalog', 'meta', 'stream'],
+  idPrefixes:       ['itflixhd_', 'tt'],
+  behaviorHints:    { adult: false, p2p: true },
+  configurationUrl: 'https://itflix-tremio.onrender.com/configure',
 };
 
 // ── pMap ──────────────────────────────────────────────────────────────────────
@@ -705,3 +706,14 @@ Promise.all([getMovies(), getSeriesStreams()]).then(() => {
     console.log(`Com RD:        http://localhost:${PORT}/SUA_KEY/manifest.json\n`);
   });
 });
+
+// ── Keep-Alive (evita hibernação no Render) ───────────────────────────────────
+const SELF_URL = 'https://itflix-tremio.onrender.com/manifest.json';
+setInterval(async () => {
+  try {
+    await fetchWithTimeout(SELF_URL, 10_000, 1);
+    console.log('[Keep-alive] ping OK');
+  } catch (e) {
+    console.warn('[Keep-alive] falhou:', e.message);
+  }
+}, 10 * 60 * 1000); // ping a cada 10 minutos
