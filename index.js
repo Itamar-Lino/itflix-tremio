@@ -682,89 +682,117 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 </html>`;
 
 // ── Servidor HTTP Customizado ─────────────────────────────────────────────────
+// O SDK do Stremio NÃO repassa query params para o extra{} do handler.
+// Por isso interceptamos manualmente /:rdKey/stream/... e chamamos
+// o handler directamente via addonIface.get(), sem passar pelo sdkRouter.
+//
 // Rotas:
-//   GET /                         → página de configuração
-//   GET /configure                → página de configuração
-//   GET /configure/:rdKey         → página de configuração com key pré-preenchida
-//   GET /manifest.json            → manifest (sem RD)
-//   GET /:rdKey/manifest.json     → manifest DINÂMICO com rdKey embutida no ID
-//   GET /:rdKey/stream/...        → streams com RD
-//   GET /:rdKey/meta/...          → meta com RD
-//   GET /:rdKey/catalog/...       → catalog com RD
+//   GET /                             → página de configuração
+//   GET /configure[/:rdKey]           → página de configuração
+//   GET /manifest.json                → manifest base (sem RD)
+//   GET /:rdKey/manifest.json         → manifest dinâmico (ID único por key)
+//   GET /:rdKey/stream/:type/:id.json → stream com rdKey injectada DIRECTAMENTE
+//   GET /:rdKey/meta/:type/:id.json   → proxy para sdkRouter
+//   GET /:rdKey/catalog/...           → proxy para sdkRouter
 
 const PORT       = process.env.PORT || 7000;
 const addonIface = builder.getInterface();
 const sdkRouter  = getRouter(addonIface);
 
-// Gera um manifest personalizado com a rdKey embutida no ID do addon.
-// Isso garante que o Stremio trate cada key como addon único e nunca perca a referência.
-function buildManifestForKey(rdKey) {
-  return {
-    ...manifest,
-    // ID único por key → Stremio mantém instalações separadas por utilizador
-    id:          `com.itflixhd.addon.${rdKey}`,
-    // Remove o campo config (já não é necessário — a key está na URL)
-    config:      undefined,
-    behaviorHints: {
-      ...manifest.behaviorHints,
-      configurable:          true,
-      configurationRequired: false,
-    },
-  };
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function jsonOk(res, data) {
+  res.writeHead(200, {
+    'Content-Type':                'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.end(JSON.stringify(data));
 }
 
-function handleRequest(req, res) {
-  const parsed   = url.parse(req.url, true);
-  const pathname = parsed.pathname;
+function notFound(res) {
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('Not found');
+}
 
-  // ── CORS ──────────────────────────────────────────────────────────────────
+// ── Manifest dinâmico ─────────────────────────────────────────────────────────
+// ID único por key → Stremio mantém a URL completa em todas as chamadas futuras
+function buildManifestForKey(rdKey) {
+  const m = JSON.parse(JSON.stringify(manifest));
+  m.id = 'com.itflixhd.addon.' + rdKey;
+  delete m.config;
+  return m;
+}
+
+// ── Stream handler com rdKey injectada directamente ───────────────────────────
+async function handleStreamWithRd(rdKey, type, rawId, res) {
+  const id = decodeURIComponent(rawId).replace(/\.json$/, '');
+  console.log('[STREAM] rdKey=' + rdKey.slice(0,8) + '... type=' + type + ' id=' + id);
+  try {
+    const result = await addonIface.get('stream', type, id, { rdKey });
+    jsonOk(res, result || { streams: [] });
+  } catch (err) {
+    console.error('[STREAM] erro:', err.message);
+    jsonOk(res, { streams: [] });
+  }
+}
+
+// ── Servidor ──────────────────────────────────────────────────────────────────
+function handleRequest(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
-  // ── Página de configuração ─────────────────────────────────────────────
+  const parsed   = require('url').parse(req.url, true);
+  const pathname = parsed.pathname;
+
+  // Página de configuração
   if (pathname === '/' || pathname === '/configure' || pathname.startsWith('/configure/')) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(CONFIG_PAGE);
   }
 
-  // ── Detecta rdKey no primeiro segmento da URL ──────────────────────────
-  const sdkPaths = ['manifest.json', 'stream', 'meta', 'catalog'];
   const segments = pathname.split('/').filter(Boolean);
+  const sdkRoots = ['manifest.json', 'stream', 'meta', 'catalog'];
   const firstSeg = segments[0] || '';
 
-  if (firstSeg && !sdkPaths.includes(firstSeg)) {
-    const rdKey   = decodeURIComponent(firstSeg);
-    const subPath = '/' + segments.slice(1).join('/');
-
-    // ── Serve manifest dinâmico com a rdKey embutida ───────────────────
-    if (subPath === '/manifest.json' || subPath === '/') {
-      const dynManifest = buildManifestForKey(rdKey);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      console.log(`Manifest dinâmico servido para RD Key: ${rdKey.slice(0, 8)}...`);
-      return res.end(JSON.stringify(dynManifest));
-    }
-
-    // ── Para stream/meta/catalog: injeta rdKey via query string ────────
-    const sep = subPath.includes('?') ? '&' : '?';
-    req.url   = subPath + sep + 'rdKey=' + encodeURIComponent(rdKey);
-    console.log(`RD Key via URL: ${rdKey.slice(0, 8)}... → ${subPath}`);
+  // Rotas sem rdKey → SDK directamente
+  if (!firstSeg || sdkRoots.includes(firstSeg)) {
+    return sdkRouter(req, res, () => notFound(res));
   }
 
-  // ── Passa para o router do SDK ─────────────────────────────────────────
-  sdkRouter(req, res, () => {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not found');
-  });
+  // Rotas com rdKey
+  const rdKey   = decodeURIComponent(firstSeg);
+  const subSegs = segments.slice(1);
+  const subRoot = subSegs[0] || '';
+
+  // /:rdKey/manifest.json
+  if (subRoot === 'manifest.json' || subSegs.length === 0) {
+    console.log('[MANIFEST] rdKey=' + rdKey.slice(0,8) + '...');
+    return jsonOk(res, buildManifestForKey(rdKey));
+  }
+
+  // /:rdKey/stream/:type/:id.json  ← ROTA CRÍTICA — chama handler directamente
+  if (subRoot === 'stream' && subSegs.length >= 3) {
+    const type  = subSegs[1];
+    const rawId = subSegs.slice(2).join('/');
+    return handleStreamWithRd(rdKey, type, rawId, res);
+  }
+
+  // /:rdKey/meta|catalog/... → proxy para SDK (sem rdKey, só conteúdo)
+  if (subRoot === 'meta' || subRoot === 'catalog') {
+    req.url = '/' + subSegs.join('/');
+    return sdkRouter(req, res, () => notFound(res));
+  }
+
+  notFound(res);
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 Promise.all([getMovies(), getSeriesStreams()]).then(() => {
-  http.createServer(handleRequest).listen(PORT, () => {
-    console.log(`\nITFLIXHD v1.6.0 rodando`);
-    console.log(`Configuracao:  http://localhost:${PORT}/`);
-    console.log(`Manifest:      http://localhost:${PORT}/manifest.json`);
-    console.log(`Com RD:        http://localhost:${PORT}/SUA_KEY/manifest.json\n`);
+  require('http').createServer(handleRequest).listen(PORT, () => {
+    console.log('\nITFLIXHD v1.7.0 rodando');
+    console.log('Configuracao:  http://localhost:' + PORT + '/');
+    console.log('Manifest:      http://localhost:' + PORT + '/manifest.json');
+    console.log('Com RD:        http://localhost:' + PORT + '/SUA_KEY/manifest.json\n');
   });
 });
 
