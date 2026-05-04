@@ -12,7 +12,7 @@ const SERIES_URL =
 // ── Real-Debrid API Key fixa ──────────────────────────────────────────────────
 // Cole sua API Key aqui (obtenha em real-debrid.com/apitoken)
 // Deixe como null para desativar o Real-Debrid
-const RD_API_KEY = 'MOBD2BOZJKNISTJ56SAGMLZXT6673DZCFDLVEUKFVJ43X2S2USHA'; // ex: 'ABCDEF123456...'
+const RD_API_KEY = ''; // ex: 'ABCDEF123456...'
 
 const TMDB_API_KEY  = 'c311ad203b7db4a3bf1e1275ecdf41de';
 const TMDB_BASE     = 'https://api.themoviedb.org/3';
@@ -136,7 +136,11 @@ const manifest = {
   ],
   resources:     ['catalog', 'meta', 'stream'],
   idPrefixes:    ['itflixhd_', 'tt'],
-  behaviorHints: { adult: false, p2p: true },
+  behaviorHints: {
+    adult: false,
+    p2p:   true,
+    configurationRequired: true,
+  },
 };
 
 // ── pMap ──────────────────────────────────────────────────────────────────────
@@ -651,12 +655,12 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 
 // ── Servidor HTTP Customizado ─────────────────────────────────────────────────
 // Rotas:
-//   GET /                      → página de configuração
-//   GET /configure             → página de configuração
-//   GET /manifest.json         → manifest (sem RD)
-//   GET /:rdKey/manifest.json  → manifest (com RD na URL)
-//   GET /:rdKey/stream/...     → streams com RD injetado via extra.rdKey
-//   GET /stream/...            → streams sem RD
+//   GET /                           → página de configuração
+//   GET /configure                  → página de configuração
+//   GET /manifest.json              → manifest base (mostra engrenagem ⚙️ no Stremio)
+//   GET /:rdKey/manifest.json       → manifest com RD (sem configurationRequired)
+//   GET /:rdKey/stream/...          → streams com RD injetado via extra.rdKey
+//   GET /stream/...                 → streams sem RD
 
 const PORT       = process.env.PORT || 7000;
 const addonIface = builder.getInterface();
@@ -666,26 +670,50 @@ function handleRequest(req, res) {
   const parsed   = url.parse(req.url, true);
   const pathname = parsed.pathname;
 
+  // Detecta o host para montar URLs dinamicamente
+  const host    = req.headers.host || `localhost:${PORT}`;
+  const proto   = (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
+  const baseUrl = `${proto}://${host}`;
+
   // Página de configuração
   if (pathname === '/' || pathname === '/configure') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(CONFIG_PAGE);
   }
 
+  // Manifest base — o Stremio mostra a engrenagem ⚙️ porque configurationRequired=true
+  if (pathname === '/manifest.json') {
+    const m = {
+      ...manifest,
+      configureUrl: `${baseUrl}/configure`,
+      behaviorHints: { ...manifest.behaviorHints, configurationRequired: true },
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+    return res.end(JSON.stringify(m));
+  }
+
   // /:rdKey/<recurso> — detecta rdKey no primeiro segmento da URL
-  // O rdKey nunca vai ser "manifest.json", "stream", "meta", "catalog"
   const sdkPaths = ['manifest.json', 'stream', 'meta', 'catalog'];
   const firstSeg = pathname.split('/').filter(Boolean)[0] || '';
 
   if (firstSeg && !sdkPaths.includes(firstSeg)) {
-    // É uma URL com rdKey
     const rdKey   = decodeURIComponent(firstSeg);
     const subPath = pathname.replace('/' + firstSeg, '') || '/';
 
-    // Injeta rdKey como query param extra para o stream handler
-    const sep     = subPath.includes('?') ? '&' : '?';
-    req.url       = subPath + sep + 'rdKey=' + encodeURIComponent(rdKey);
+    // Manifest com rdKey — configurationRequired=false (addon já configurado)
+    if (subPath === '/manifest.json' || subPath === '') {
+      const m = {
+        ...manifest,
+        configureUrl: `${baseUrl}/configure`,
+        behaviorHints: { ...manifest.behaviorHints, configurationRequired: false },
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+      return res.end(JSON.stringify(m));
+    }
 
+    // Injeta rdKey como query param extra para o stream handler
+    const sep = subPath.includes('?') ? '&' : '?';
+    req.url   = subPath + sep + 'rdKey=' + encodeURIComponent(rdKey);
     console.log(`RD Key detectada: ${rdKey.slice(0, 8)}... → ${req.url}`);
   }
 
