@@ -133,7 +133,6 @@ const manifest = {
   ],
   resources:     ['catalog', 'meta', 'stream'],
   idPrefixes:    ['itflixhd_', 'tt'],
-  configurationUrl: 'https://itflix-tremio.onrender.com/configure',
   behaviorHints: { adult: false, p2p: true, configurable: true, configurationRequired: false },
   // ★ CAMPO CHAVE: cada utilizador insere a sua própria API Key aqui
   config: [
@@ -285,7 +284,7 @@ function buildStreamObj(s, extraHints = {}) {
 function buildRdStreamObj(s, rdUrl, extraHints = {}) {
   const label = [parseQuality(s), parseAudio(s)].filter(Boolean).join(' | ');
   return {
-    name:  `RD | ITFLIXHD\n${label}`,
+    name:  `⚡ RD | ITFLIXHD\n${label}`,
     title: s.title || s.name || '',
     url:   rdUrl,
     ...(Object.keys(extraHints).length ? { behaviorHints: extraHints } : {}),
@@ -639,25 +638,12 @@ const CONFIG_PAGE = `<!DOCTYPE html>
   </div>
 
   <script>
-    // ── Detecta a rdKey na URL em qualquer formato ────────────────────────────
-    // Formatos possíveis que o Stremio usa:
-    //   /configure                  → sem key
-    //   /configure/MYKEY            → key após /configure/
-    //   /MYKEY/configure            → key antes de /configure (formato Stremio)
+    // ── Detecta se há uma key já na URL (ex: /configure/MYKEY123) ──────────────
     (function() {
       const parts = window.location.pathname.split('/').filter(Boolean);
-      let rdKey = null;
-
+      // /configure está em partes[0]; se houver partes[1], é a rdKey
       if (parts.length >= 2 && parts[0] === 'configure') {
-        // /configure/MYKEY
-        rdKey = parts[1];
-      } else if (parts.length >= 2 && parts[parts.length - 1] === 'configure') {
-        // /MYKEY/configure  ← formato que o Stremio usa ao clicar na engrenagem
-        rdKey = parts[parts.length - 2];
-      }
-
-      if (rdKey) {
-        document.getElementById('rd-key').value = decodeURIComponent(rdKey);
+        document.getElementById('rd-key').value = decodeURIComponent(parts[1]);
       }
     })();
 
@@ -697,84 +683,75 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 
 // ── Servidor HTTP Customizado ─────────────────────────────────────────────────
 // Rotas:
-//   GET /                       → página de configuração
-//   GET /configure              → página de configuração
-//   GET /configure/:rdKey       → página de configuração com key pré-preenchida
-//   GET /manifest.json          → manifest (sem RD)
-//   GET /:rdKey/manifest.json   → manifest (com RD na URL — compatibilidade)
-//   GET /:rdKey/stream/...      → streams com RD injetado via extra.rdKey
+//   GET /                         → página de configuração
+//   GET /configure                → página de configuração
+//   GET /configure/:rdKey         → página de configuração com key pré-preenchida
+//   GET /manifest.json            → manifest (sem RD)
+//   GET /:rdKey/manifest.json     → manifest DINÂMICO com rdKey embutida no ID
+//   GET /:rdKey/stream/...        → streams com RD
+//   GET /:rdKey/meta/...          → meta com RD
+//   GET /:rdKey/catalog/...       → catalog com RD
 
 const PORT       = process.env.PORT || 7000;
 const addonIface = builder.getInterface();
 const sdkRouter  = getRouter(addonIface);
 
+// Gera um manifest personalizado com a rdKey embutida no ID do addon.
+// Isso garante que o Stremio trate cada key como addon único e nunca perca a referência.
+function buildManifestForKey(rdKey) {
+  return {
+    ...manifest,
+    // ID único por key → Stremio mantém instalações separadas por utilizador
+    id:          `com.itflixhd.addon.${rdKey}`,
+    // Remove o campo config (já não é necessário — a key está na URL)
+    config:      undefined,
+    behaviorHints: {
+      ...manifest.behaviorHints,
+      configurable:          true,
+      configurationRequired: false,
+    },
+  };
+}
+
 function handleRequest(req, res) {
   const parsed   = url.parse(req.url, true);
   const pathname = parsed.pathname;
-  const segments = pathname.split('/').filter(Boolean);
-  const lastSeg  = segments[segments.length - 1] || '';
 
-  // Página de configuração — todos os formatos:
-  //   /
-  //   /configure
-  //   /configure/:rdKey
-  //   /:rdKey/configure   <- formato que o Stremio usa ao clicar na engrenagem
-  const isConfigRoute =
-    pathname === '/' ||
-    pathname === '/configure' ||
-    pathname.startsWith('/configure/') ||
-    (segments.length >= 2 && lastSeg === 'configure');
+  // ── CORS ──────────────────────────────────────────────────────────────────
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
-  if (isConfigRoute) {
+  // ── Página de configuração ─────────────────────────────────────────────
+  if (pathname === '/' || pathname === '/configure' || pathname.startsWith('/configure/')) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(CONFIG_PAGE);
   }
 
-  // /:rdKey/<recurso> — detecta rdKey no primeiro segmento da URL
+  // ── Detecta rdKey no primeiro segmento da URL ──────────────────────────
   const sdkPaths = ['manifest.json', 'stream', 'meta', 'catalog'];
+  const segments = pathname.split('/').filter(Boolean);
   const firstSeg = segments[0] || '';
 
   if (firstSeg && !sdkPaths.includes(firstSeg)) {
     const rdKey   = decodeURIComponent(firstSeg);
-    const subPath = pathname.replace('/' + firstSeg, '') || '/';
-    const base    = `https://${req.headers.host}`;
+    const subPath = '/' + segments.slice(1).join('/');
 
-    // ── /:rdKey/manifest.json → retorna manifest personalizado com a key ──────
-    // O Stremio usa esse manifest para todas as requisições seguintes.
-    // O manifest tem a rdKey embutida no ID e nas URLs, então o Stremio
-    // sempre envia as requisições com a key na URL.
-    if (subPath === '/manifest.json' || subPath === '/manifest.json/') {
-      const customManifest = {
-        ...manifest,
-        // ID único por key: evita conflito se a pessoa mudar a key
-        id: `com.itflixhd.addon.${Buffer.from(rdKey).toString('hex').slice(0, 12)}`,
-        // Todas as URLs de recursos já incluem a rdKey
-        catalogPrefix: `${base}/${encodeURIComponent(rdKey)}`,
-        // configurationUrl com a key pré-preenchida
-        configurationUrl: `${base}/${encodeURIComponent(rdKey)}/configure`,
-        // behaviorHints: marca como configurado (não pede config de novo)
-        behaviorHints: {
-          ...manifest.behaviorHints,
-          configurable: true,
-          configurationRequired: false,
-        },
-      };
-      res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      });
-      console.log(`Manifest com RD Key: ${rdKey.slice(0, 8)}...`);
-      return res.end(JSON.stringify(customManifest));
+    // ── Serve manifest dinâmico com a rdKey embutida ───────────────────
+    if (subPath === '/manifest.json' || subPath === '/') {
+      const dynManifest = buildManifestForKey(rdKey);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      console.log(`Manifest dinâmico servido para RD Key: ${rdKey.slice(0, 8)}...`);
+      return res.end(JSON.stringify(dynManifest));
     }
 
-    // Injeta rdKey como query param para stream/meta/catalog handlers
+    // ── Para stream/meta/catalog: injeta rdKey via query string ────────
     const sep = subPath.includes('?') ? '&' : '?';
     req.url   = subPath + sep + 'rdKey=' + encodeURIComponent(rdKey);
-
     console.log(`RD Key via URL: ${rdKey.slice(0, 8)}... → ${subPath}`);
   }
 
-  // Passa para o router do SDK
+  // ── Passa para o router do SDK ─────────────────────────────────────────
   sdkRouter(req, res, () => {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not found');
