@@ -1,33 +1,26 @@
 const { addonBuilder, getRouter } = require('stremio-addon-sdk');
-const { AsyncLocalStorage }       = require('async_hooks');
 const http = require('http');
 const url  = require('url');
 
 // ── Configurações ─────────────────────────────────────────────────────────────
 const FILMES_URL =
   'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/filmes.json';
-
 const SERIES_URL =
   'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/series.json';
 
-// ── Real-Debrid ───────────────────────────────────────────────────────────────
-// Configure a variável de ambiente RD_API_KEY no Render.com (Environment Variables)
-// Nunca coloque a key direto no código!
+// RD_API_KEY de ambiente (fallback quando não há key na URL)
 const RD_API_KEY = process.env.RD_API_KEY || null;
 
-// AsyncLocalStorage para passar a rdKey pelo contexto da requisição
-const rdKeyStorage = new AsyncLocalStorage();
-
-const TMDB_API_KEY  = 'c311ad203b7db4a3bf1e1275ecdf41de';
-const TMDB_BASE     = 'https://api.themoviedb.org/3';
-const TMDB_POSTER   = 'https://image.tmdb.org/t/p/w500';
-const TMDB_BACK     = 'https://image.tmdb.org/t/p/w1280';
+const TMDB_API_KEY = 'c311ad203b7db4a3bf1e1275ecdf41de';
+const TMDB_BASE    = 'https://api.themoviedb.org/3';
+const TMDB_POSTER  = 'https://image.tmdb.org/t/p/w500';
+const TMDB_BACK    = 'https://image.tmdb.org/t/p/w1280';
 
 const CACHE_TTL     = 30 * 60 * 1000;
 const TMDB_TTL      = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT = 7_000;
 
-// ── Real-Debrid API ───────────────────────────────────────────────────────────
+// ── Real-Debrid ───────────────────────────────────────────────────────────────
 const RD_BASE = 'https://api.real-debrid.com/rest/1.0';
 
 async function rdAddMagnet(apiKey, infoHash, sources) {
@@ -35,7 +28,6 @@ async function rdAddMagnet(apiKey, infoHash, sources) {
     .filter(s => s.startsWith('tracker:'))
     .map(s => s.replace('tracker:', ''))
     .join('&tr=');
-
   const magnet = `magnet:?xt=urn:btih:${infoHash}${trackers ? '&tr=' + trackers : ''}`;
 
   const addRes = await fetchWithTimeout(`${RD_BASE}/torrents/addMagnet`, 10_000, 1,
@@ -52,7 +44,6 @@ async function rdAddMagnet(apiKey, infoHash, sources) {
   );
   if (!selRes.ok) console.warn(`RD selectFiles HTTP ${selRes.status}`);
 
-  // Aumentado para 10 tentativas × 5s = 50s para torrents novos
   for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 5000));
     const infoRes = await fetchWithTimeout(`${RD_BASE}/torrents/info/${torrentId}`, 8_000, 1,
@@ -129,7 +120,7 @@ const DEFAULT_TRACKERS = [
 // ── Manifest ──────────────────────────────────────────────────────────────────
 const manifest = {
   id:          'com.itflixhd.addon',
-  version:     '1.5.0',
+  version:     '1.6.0',
   name:        'ITFLIXHD',
   description: 'Assista filmes e series em HD. Suporte a Real-Debrid.',
   logo:        'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/itflix.png',
@@ -259,8 +250,8 @@ function streamId(stream) {
   return `${base}_${stream.fileIdx ?? 0}`;
 }
 
-function findByImdbId(streams, id) { return streams.find(s => s.imdbId === id); }
-function findByInternalId(streams, rawId) { return streams.find(s => streamId(s) === rawId); }
+function findByImdbId(streams, id)     { return streams.find(s => s.imdbId === id); }
+function findByInternalId(streams, id) { return streams.find(s => streamId(s) === id); }
 
 function mergeTrackers(sources) {
   const s = new Set(sources || []);
@@ -321,9 +312,24 @@ async function getTmdbByImdb(imdbId, mediaType = 'movie') {
   }
 }
 
+// ── rdKey helper ──────────────────────────────────────────────────────────────
+// O servidor injeta "RD:KEY:" no início do ID quando a req vem com key na URL.
+// Exemplo: ID original "tt1234567" → ID reescrito "RD:MYKEY:tt1234567"
+// Esta função separa os dois.
+function extractRdKey(id) {
+  if (id && id.startsWith('RD:')) {
+    const second = id.indexOf(':', 3);
+    if (second !== -1) {
+      return { rdKey: id.slice(3, second), realId: id.slice(second + 1) };
+    }
+  }
+  return { rdKey: RD_API_KEY, realId: id };
+}
+
 // ── Builder do Addon ──────────────────────────────────────────────────────────
 const builder = new addonBuilder(manifest);
 
+// ── Catalog Handler ───────────────────────────────────────────────────────────
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
   const search = extra?.search?.toLowerCase() || null;
 
@@ -369,7 +375,11 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
   return { metas: [] };
 });
 
+// ── Meta Handler ──────────────────────────────────────────────────────────────
 builder.defineMetaHandler(async ({ type, id }) => {
+  const { realId } = extractRdKey(id);
+  id = realId;
+
   if (type === 'movie') {
     const streams = await getMovies();
     const rawId   = id.replace('itflixhd_', '');
@@ -428,10 +438,11 @@ builder.defineMetaHandler(async ({ type, id }) => {
 });
 
 // ── Stream Handler ────────────────────────────────────────────────────────────
-// A rdKey é lida do AsyncLocalStorage (injetada pelo handleRequest)
+// O servidor HTTP injeta "RD:KEY:" no ID antes de passar para o SDK.
+// Este handler extrai a key e o id real, depois chama o RD.
 builder.defineStreamHandler(async ({ type, id }) => {
-  // Pega a key do contexto da requisição (via URL) ou cai no fallback de env
-  const rdKey = rdKeyStorage.getStore() || RD_API_KEY || null;
+  const { rdKey, realId } = extractRdKey(id);
+  id = realId;
 
   if (rdKey) {
     console.log(`Stream com RD Key: ${rdKey.slice(0, 8)}...`);
@@ -494,112 +505,26 @@ const CONFIG_PAGE = `<!DOCTYPE html>
   <title>ITFLIXHD - Configurar</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: #0f0f1a;
-      color: #fff;
-      font-family: 'Segoe UI', sans-serif;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-    }
-    .card {
-      background: #1a1a2e;
-      border: 1px solid #2a2a4a;
-      border-radius: 16px;
-      padding: 40px;
-      width: 100%;
-      max-width: 480px;
-      box-shadow: 0 8px 40px rgba(0,0,0,0.5);
-    }
-    .logo {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      margin-bottom: 32px;
-    }
+    body { background: #0f0f1a; color: #fff; font-family: 'Segoe UI', sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+    .card { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 16px; padding: 40px; width: 100%; max-width: 480px; box-shadow: 0 8px 40px rgba(0,0,0,0.5); }
+    .logo { display: flex; align-items: center; gap: 14px; margin-bottom: 32px; }
     .logo img { width: 54px; height: 54px; border-radius: 12px; }
     .logo h1 { font-size: 1.6rem; letter-spacing: 1px; }
     .logo span { color: #e50914; }
     .section { margin-bottom: 24px; }
-    label {
-      display: block;
-      font-size: 0.82rem;
-      color: #aaa;
-      margin-bottom: 8px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .badge {
-      display: inline-block;
-      background: #1a2d1a;
-      color: #4caf50;
-      border-radius: 6px;
-      font-size: 0.7rem;
-      padding: 2px 8px;
-      margin-left: 6px;
-      vertical-align: middle;
-      text-transform: none;
-      letter-spacing: 0;
-    }
-    input[type=text] {
-      width: 100%;
-      background: #0f0f1a;
-      border: 1px solid #2a2a4a;
-      border-radius: 8px;
-      color: #fff;
-      font-size: 0.95rem;
-      padding: 12px 14px;
-      outline: none;
-      transition: border-color 0.2s;
-    }
+    label { display: block; font-size: 0.82rem; color: #aaa; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .badge { display: inline-block; background: #1a2d1a; color: #4caf50; border-radius: 6px; font-size: 0.7rem; padding: 2px 8px; margin-left: 6px; vertical-align: middle; text-transform: none; letter-spacing: 0; }
+    input[type=text] { width: 100%; background: #0f0f1a; border: 1px solid #2a2a4a; border-radius: 8px; color: #fff; font-size: 0.95rem; padding: 12px 14px; outline: none; transition: border-color 0.2s; }
     input[type=text]:focus { border-color: #e50914; }
     .hint { font-size: 0.78rem; color: #555; margin-top: 6px; }
     .hint a { color: #e50914; text-decoration: none; }
     .hint a:hover { text-decoration: underline; }
-    .btn {
-      display: block;
-      width: 100%;
-      padding: 14px;
-      background: #e50914;
-      color: #fff;
-      font-size: 1rem;
-      font-weight: 700;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-      text-align: center;
-      text-decoration: none;
-      margin-top: 8px;
-      transition: background 0.2s;
-    }
+    .btn { display: block; width: 100%; padding: 14px; background: #e50914; color: #fff; font-size: 1rem; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; text-align: center; text-decoration: none; margin-top: 8px; transition: background 0.2s; }
     .btn:hover { background: #c4070f; }
-    .btn-outline {
-      background: transparent;
-      border: 1px solid #2a2a4a;
-      color: #888;
-      font-weight: 400;
-      margin-top: 10px;
-    }
+    .btn-outline { background: transparent; border: 1px solid #2a2a4a; color: #888; font-weight: 400; margin-top: 10px; }
     .btn-outline:hover { border-color: #555; color: #fff; }
-    #link-box {
-      display: none;
-      background: #0f0f1a;
-      border: 1px solid #2a2a4a;
-      border-radius: 8px;
-      padding: 10px 14px;
-      font-size: 0.78rem;
-      color: #777;
-      word-break: break-all;
-      margin-top: 14px;
-      line-height: 1.5;
-    }
-    .divider {
-      border: none;
-      border-top: 1px solid #2a2a4a;
-      margin: 28px 0;
-    }
+    #link-box { display: none; background: #0f0f1a; border: 1px solid #2a2a4a; border-radius: 8px; padding: 10px 14px; font-size: 0.78rem; color: #777; word-break: break-all; margin-top: 14px; line-height: 1.5; }
+    .divider { border: none; border-top: 1px solid #2a2a4a; margin: 28px 0; }
     .info { font-size: 0.82rem; color: #555; line-height: 1.6; }
     .info strong { color: #888; }
   </style>
@@ -610,27 +535,20 @@ const CONFIG_PAGE = `<!DOCTYPE html>
       <img src="https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/itflix.png" alt="logo"/>
       <h1>ITF<span>LIX</span>HD</h1>
     </div>
-
     <div class="section">
       <label>Real-Debrid API Key <span class="badge">opcional</span></label>
       <input type="text" id="rd-key" placeholder="Cole sua API Key aqui..."/>
       <p class="hint">Obtenha em <a href="https://real-debrid.com/apitoken" target="_blank">real-debrid.com/apitoken</a></p>
     </div>
-
     <button class="btn" onclick="instalar()">Instalar no Stremio</button>
     <button class="btn btn-outline" onclick="copiarLink()">Copiar link do manifest</button>
-
     <div id="link-box"></div>
-
     <hr class="divider"/>
-
     <p class="info">
       <strong>Sem Real-Debrid:</strong> os streams usam torrent direto no Stremio.<br/><br/>
-      <strong>Com Real-Debrid:</strong> os streams aparecem como links HTTP diretos,
-      mais rapidos e sem precisar de VPN.
+      <strong>Com Real-Debrid:</strong> os streams aparecem como links HTTP diretos, mais rapidos e sem precisar de VPN.
     </p>
   </div>
-
   <script>
     function buildManifestUrl() {
       const rdKey = document.getElementById('rd-key').value.trim();
@@ -639,7 +557,6 @@ const CONFIG_PAGE = `<!DOCTYPE html>
         ? base + '/' + encodeURIComponent(rdKey) + '/manifest.json'
         : base + '/manifest.json';
     }
-
     function instalar() {
       const manifestUrl = buildManifestUrl();
       window.location.href = 'stremio://' + manifestUrl.replace(/^https?:\\/\\//, '');
@@ -649,7 +566,6 @@ const CONFIG_PAGE = `<!DOCTYPE html>
         box.innerHTML = '<strong style="color:#aaa">Caso o Stremio nao abra, cole este link em Addons > Instalar do URL:</strong><br/><br/>' + manifestUrl;
       }, 1500);
     }
-
     function copiarLink() {
       const manifestUrl = buildManifestUrl();
       navigator.clipboard.writeText(manifestUrl).catch(() => {});
@@ -661,14 +577,10 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 </body>
 </html>`;
 
-// ── Servidor HTTP Customizado ─────────────────────────────────────────────────
-// Rotas:
-//   GET /                      → página de configuração
-//   GET /configure             → página de configuração
-//   GET /manifest.json         → manifest (sem RD)
-//   GET /:rdKey/manifest.json  → manifest (com RD na URL)
-//   GET /:rdKey/stream/...     → streams com RD via AsyncLocalStorage
-//   GET /stream/...            → streams sem RD
+// ── Servidor HTTP ─────────────────────────────────────────────────────────────
+// Quando a URL vem com /:rdKey/stream/type/ID.json
+// o servidor reescreve o ID para "RD:KEY:ID" antes de passar ao SDK.
+// O stream handler então chama extractRdKey(id) para separar key e id real.
 
 const PORT       = process.env.PORT || 7000;
 const addonIface = builder.getInterface();
@@ -678,42 +590,41 @@ const SDK_PATHS = new Set(['manifest.json', 'stream', 'meta', 'catalog']);
 
 function handleRequest(req, res) {
   const parsed   = url.parse(req.url, true);
-  const pathname = parsed.pathname;
+  let   pathname = parsed.pathname;
 
-  // Página de configuração
   if (pathname === '/' || pathname === '/configure') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(CONFIG_PAGE);
   }
 
-  // Detecta /:rdKey/ no primeiro segmento
   const segments = pathname.split('/').filter(Boolean);
   const firstSeg = segments[0] || '';
 
-  let rdKey = null;
-
   if (firstSeg && !SDK_PATHS.has(firstSeg)) {
-    // Primeiro segmento é a rdKey
-    rdKey    = decodeURIComponent(firstSeg);
-    req.url  = '/' + segments.slice(1).join('/');
-    if (!req.url || req.url === '/') req.url = '/manifest.json';
-    console.log(`RD Key detectada: ${rdKey.slice(0, 8)}... → ${req.url}`);
+    const rdKey = decodeURIComponent(firstSeg);
+    const rest  = segments.slice(1); // sem o segmento da key
+
+    // Injeta a key no ID do stream: /stream/movie/ID.json → /stream/movie/RD:KEY:ID.json
+    if (rest[0] === 'stream' && rest.length >= 3) {
+      const lastPart = rest[rest.length - 1];
+      const idRaw    = lastPart.replace(/\.json$/, '');
+      rest[rest.length - 1] = `RD:${rdKey}:${idRaw}.json`;
+    }
+
+    req.url = '/' + rest.join('/');
+    console.log(`RD Key: ${rdKey.slice(0, 8)}... → ${req.url}`);
   }
 
-  // Envolve a chamada ao SDK no contexto com a rdKey
-  // O stream handler acessa via rdKeyStorage.getStore()
-  rdKeyStorage.run(rdKey, () => {
-    sdkRouter(req, res, () => {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Not found');
-    });
+  sdkRouter(req, res, () => {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not found');
   });
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 Promise.all([getMovies(), getSeriesStreams()]).then(() => {
   http.createServer(handleRequest).listen(PORT, () => {
-    console.log(`\nITFLIXHD v1.5.0 rodando`);
+    console.log(`\nITFLIXHD v1.6.0 rodando`);
     console.log(`Configuracao:  http://localhost:${PORT}/`);
     console.log(`Manifest:      http://localhost:${PORT}/manifest.json`);
     console.log(`Com RD:        http://localhost:${PORT}/SUA_KEY/manifest.json\n`);
