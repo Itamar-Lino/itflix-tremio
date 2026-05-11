@@ -1,4 +1,5 @@
 const { addonBuilder, getRouter } = require('stremio-addon-sdk');
+const { AsyncLocalStorage }       = require('async_hooks');
 const http = require('http');
 const url  = require('url');
 
@@ -9,10 +10,13 @@ const FILMES_URL =
 const SERIES_URL =
   'https://raw.githubusercontent.com/Itamar-Lino/lista/refs/heads/main/series.json';
 
-// ── Real-Debrid API Key fixa ──────────────────────────────────────────────────
-// Cole sua API Key aqui (obtenha em real-debrid.com/apitoken)
-// Deixe como null para desativar o Real-Debrid
-const RD_API_KEY = 'SFG3MY2JS64RDOWSVGM7QKFIE6C3QJTQEQJ45IZOGJ6UGF7Y5QIA'; // ex: 'ABCDEF123456...'
+// ── Real-Debrid ───────────────────────────────────────────────────────────────
+// Configure a variável de ambiente RD_API_KEY no Render.com (Environment Variables)
+// Nunca coloque a key direto no código!
+const RD_API_KEY = process.env.RD_API_KEY || null;
+
+// AsyncLocalStorage para passar a rdKey pelo contexto da requisição
+const rdKeyStorage = new AsyncLocalStorage();
 
 const TMDB_API_KEY  = 'c311ad203b7db4a3bf1e1275ecdf41de';
 const TMDB_BASE     = 'https://api.themoviedb.org/3';
@@ -23,7 +27,7 @@ const CACHE_TTL     = 30 * 60 * 1000;
 const TMDB_TTL      = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT = 7_000;
 
-// ── Real-Debrid ───────────────────────────────────────────────────────────────
+// ── Real-Debrid API ───────────────────────────────────────────────────────────
 const RD_BASE = 'https://api.real-debrid.com/rest/1.0';
 
 async function rdAddMagnet(apiKey, infoHash, sources) {
@@ -48,8 +52,9 @@ async function rdAddMagnet(apiKey, infoHash, sources) {
   );
   if (!selRes.ok) console.warn(`RD selectFiles HTTP ${selRes.status}`);
 
-  for (let i = 0; i < 5; i++) {
-    await new Promise(r => setTimeout(r, 3000));
+  // Aumentado para 10 tentativas × 5s = 50s para torrents novos
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 5000));
     const infoRes = await fetchWithTimeout(`${RD_BASE}/torrents/info/${torrentId}`, 8_000, 1,
       { Authorization: `Bearer ${apiKey}` }
     );
@@ -422,9 +427,17 @@ builder.defineMetaHandler(async ({ type, id }) => {
   return { meta: null };
 });
 
-// Stream handler — usa rdKey da URL ou a key fixa definida acima
-builder.defineStreamHandler(async ({ type, id, extra }) => {
-  const rdKey = (extra && extra.rdKey) || RD_API_KEY || null;
+// ── Stream Handler ────────────────────────────────────────────────────────────
+// A rdKey é lida do AsyncLocalStorage (injetada pelo handleRequest)
+builder.defineStreamHandler(async ({ type, id }) => {
+  // Pega a key do contexto da requisição (via URL) ou cai no fallback de env
+  const rdKey = rdKeyStorage.getStore() || RD_API_KEY || null;
+
+  if (rdKey) {
+    console.log(`Stream com RD Key: ${rdKey.slice(0, 8)}...`);
+  } else {
+    console.log('Stream sem RD Key (torrent direto)');
+  }
 
   if (type === 'movie') {
     const streams = await getMovies();
@@ -629,7 +642,6 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 
     function instalar() {
       const manifestUrl = buildManifestUrl();
-      // Tenta abrir o Stremio; se falhar mostra o link
       window.location.href = 'stremio://' + manifestUrl.replace(/^https?:\\/\\//, '');
       setTimeout(() => {
         const box = document.getElementById('link-box');
@@ -655,12 +667,14 @@ const CONFIG_PAGE = `<!DOCTYPE html>
 //   GET /configure             → página de configuração
 //   GET /manifest.json         → manifest (sem RD)
 //   GET /:rdKey/manifest.json  → manifest (com RD na URL)
-//   GET /:rdKey/stream/...     → streams com RD injetado via extra.rdKey
+//   GET /:rdKey/stream/...     → streams com RD via AsyncLocalStorage
 //   GET /stream/...            → streams sem RD
 
 const PORT       = process.env.PORT || 7000;
 const addonIface = builder.getInterface();
 const sdkRouter  = getRouter(addonIface);
+
+const SDK_PATHS = new Set(['manifest.json', 'stream', 'meta', 'catalog']);
 
 function handleRequest(req, res) {
   const parsed   = url.parse(req.url, true);
@@ -672,27 +686,27 @@ function handleRequest(req, res) {
     return res.end(CONFIG_PAGE);
   }
 
-  // /:rdKey/<recurso> — detecta rdKey no primeiro segmento da URL
-  // O rdKey nunca vai ser "manifest.json", "stream", "meta", "catalog"
-  const sdkPaths = ['manifest.json', 'stream', 'meta', 'catalog'];
-  const firstSeg = pathname.split('/').filter(Boolean)[0] || '';
+  // Detecta /:rdKey/ no primeiro segmento
+  const segments = pathname.split('/').filter(Boolean);
+  const firstSeg = segments[0] || '';
 
-  if (firstSeg && !sdkPaths.includes(firstSeg)) {
-    // É uma URL com rdKey
-    const rdKey   = decodeURIComponent(firstSeg);
-    const subPath = pathname.replace('/' + firstSeg, '') || '/';
+  let rdKey = null;
 
-    // Injeta rdKey como query param extra para o stream handler
-    const sep     = subPath.includes('?') ? '&' : '?';
-    req.url       = subPath + sep + 'rdKey=' + encodeURIComponent(rdKey);
-
+  if (firstSeg && !SDK_PATHS.has(firstSeg)) {
+    // Primeiro segmento é a rdKey
+    rdKey    = decodeURIComponent(firstSeg);
+    req.url  = '/' + segments.slice(1).join('/');
+    if (!req.url || req.url === '/') req.url = '/manifest.json';
     console.log(`RD Key detectada: ${rdKey.slice(0, 8)}... → ${req.url}`);
   }
 
-  // Passa para o router do SDK
-  sdkRouter(req, res, () => {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not found');
+  // Envolve a chamada ao SDK no contexto com a rdKey
+  // O stream handler acessa via rdKeyStorage.getStore()
+  rdKeyStorage.run(rdKey, () => {
+    sdkRouter(req, res, () => {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+    });
   });
 }
 
@@ -703,5 +717,10 @@ Promise.all([getMovies(), getSeriesStreams()]).then(() => {
     console.log(`Configuracao:  http://localhost:${PORT}/`);
     console.log(`Manifest:      http://localhost:${PORT}/manifest.json`);
     console.log(`Com RD:        http://localhost:${PORT}/SUA_KEY/manifest.json\n`);
+    if (RD_API_KEY) {
+      console.log(`RD_API_KEY carregada do ambiente (${RD_API_KEY.slice(0, 8)}...)`);
+    } else {
+      console.log('RD_API_KEY nao configurada — use a URL com key ou defina a variavel de ambiente');
+    }
   });
 });
